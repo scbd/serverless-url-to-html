@@ -6,7 +6,22 @@ const AWS = require('aws-sdk');
 const _ = require('lodash');
 const minify = require('html-minifier').minify;
 
+let startTime;
+let lastCall;
+
 exports.lambdaHandler = async (event, context) => {
+    let response;
+    let url = event.queryStringParameters.url;
+
+    response = await renderHtml(url);
+
+    return response
+}
+
+async function renderHtml(clientUrl){
+
+    startTime = +new Date();
+    lastCall = +new Date();
     let response;
     let browser;
     try {        
@@ -16,10 +31,11 @@ exports.lambdaHandler = async (event, context) => {
                 executablePath: await chrome.executablePath,
                 headless: chrome.headless,
             });
+
             const page = await browser.newPage();
+            await page.setRequestInterception(true);
             log('Page initialized')
 
-            let clientUrl = event.queryStringParameters.url;
             clientUrl = clientUrl.replace(/^\//, '');
             log(`url: ${clientUrl}`)
 
@@ -31,7 +47,18 @@ exports.lambdaHandler = async (event, context) => {
                 };
             }
             log('Domain validation passed');
+            
+            page.on('request', async req => {
 
+                const requestUrl   = req.url();
+                const cURL         = new URL(requestUrl);
+                const isImg        = req.resourceType() === 'image';
+                if(isImg && ~cURL.pathname.indexOf('/api/v2013/documents/')){
+                    req.abort();
+                }
+                else
+                    req.continue();
+            });
             const stylesheetContents = {};
             let   importStyleSheets  = []
             //copy local stylesheets to inline (to avoid multiple http calls for google index).
@@ -41,9 +68,9 @@ exports.lambdaHandler = async (event, context) => {
                     if(resStatus != 200)
                         return;
 
-                    const responseUrl = resp.url();
-                    const cssURL = new URL(responseUrl);
-                    const isStylesheet = resp.request().resourceType() === 'stylesheet';
+                    const responseUrl   = resp.url();
+                    const cssURL        = new URL(responseUrl);
+                    const isStylesheet  = resp.request().resourceType() === 'stylesheet';
                     if (isStylesheet) {
                         stylesheetContents[responseUrl] = await resp.text();
     
@@ -65,7 +92,7 @@ exports.lambdaHandler = async (event, context) => {
                     }
                 }
                 catch(err){
-                    console.log(err, resp)
+                    // console.log(err, resp)
                 }
             });
 
@@ -76,9 +103,9 @@ exports.lambdaHandler = async (event, context) => {
             await page.goto(clientUrl, pdfOpts);
             log('finished goto');
 
-            await page.setViewport({ width: 1920, height: 1001 });
-            log('viewport set');
-
+            // await page.setViewport({ width: 1920, height: 1001 });
+            // log('viewport set');
+           
             // Replace stylesheets in the page with their equivalent <style>.
             await page.$$eval('link[rel="stylesheet"]', (links, content) => {
                 links.forEach(link => {
@@ -90,7 +117,8 @@ exports.lambdaHandler = async (event, context) => {
                 }
                 });
             }, stylesheetContents);
- 
+            log('Done combining stylesheets');
+
             let pageContent = await page.content();
 
             _.each(importStyleSheets, (style)=>{
@@ -101,15 +129,22 @@ exports.lambdaHandler = async (event, context) => {
                 pageContent = pageContent.replace(style.originalString, css);
  
             });
+            log('Done combining import stylesheets');
 
-            log(`page content received, length : ${pageContent.length}`)
-
+            log(`page content received, length : ${pageContent.length}(${formatBytes(pageContent.length)})`)
+            
             pageContent = removeScriptTags(pageContent);
-            pageContent = minimizeHtml(pageContent);
+            log('remove script end');
+
+            
+            if(pageContent.length < 5800000){
+                pageContent = minimizeHtml(pageContent);
+                log('minimize end');
+            }
             ////////////////////////////////
-            /// Since there is a Lambda response limit of 10MB upload content to S3 and 302 to the S3 file
+            /// Since there is a Lambda response limit of 6MB upload content to S3 and 302 to the S3 file
             ////////////////////////////////
-            if(pageContent.length < 10000000){
+            if(pageContent.length < 5800000){ //5.8 MB
                 response = {
                     'statusCode': 200,
                     'headers'   : {"Content-Type": "text/html"},
@@ -117,7 +152,7 @@ exports.lambdaHandler = async (event, context) => {
                 }
             }
             else{
-                log('response larger than 10 mb, saving to s3...')
+                log('response larger than 5.8 mb, saving to s3...')
                 const S3_BUCKET = 'pdf-cache-prod';
                 let key = 'html-files/' +guid() + '.html';
                 
@@ -133,6 +168,8 @@ exports.lambdaHandler = async (event, context) => {
 
                 let s3File = await S3.putObject(s3Options).promise();
                 log('finish upload', s3File,)
+
+                log(`Total time taken: ${(((+new Date())-startTime)/1000).toFixed(5)} secs`)
                 return {
                     statusCode: 302,
                     headers: {
@@ -153,9 +190,9 @@ exports.lambdaHandler = async (event, context) => {
     finally{
         await browser.close();            
     }
-
     return response
-};
+}
+
 
 function removeScriptTags(content){
 
@@ -174,7 +211,7 @@ function removeScriptTags(content){
     }
 
     //remove comments
-    content = content.replace(/(<!--.*?-->)|(<!--[\w\W\n\s]+?-->)/gm, '')
+    // content = content.replace(/(<!--.*?-->)|(<!--[\w\W\n\s]+?-->)/gm, '')
     
     return content;
 }
@@ -218,8 +255,8 @@ function minimizeHtml(content){
 
         var diff = orignalLength - content.length;
         var savings = orignalLength ? (100 * diff / orignalLength).toFixed(2) : 0;
-
-        log(`Original: ${orignalLength}, minified: ${content.length}, savings: ${savings}(${diff})`);
+        
+        log(`Original: ${formatBytes(orignalLength)}, minified: ${formatBytes(content.length)}, savings: ${savings}% (${formatBytes(diff)})`);
     }
     catch(e){}
     
@@ -229,7 +266,8 @@ function minimizeHtml(content){
 function log(message){
 
     if(process.env.debug){
-        console.log(message);
+        console.log(new Date(), message, `${(((+new Date())-lastCall)/1000).toFixed(5)} secs`);
+        lastCall = +new Date()
     }
 
 }
@@ -243,4 +281,16 @@ function guid(sep) {
         sep = '-';
 
     return s4() + s4() + sep + s4() + sep + s4() + sep + s4() + sep + s4() + s4() + s4();
+}
+
+function formatBytes(bytes, decimals, binaryUnits) {
+    if(bytes == 0) {
+        return '0 Bytes';
+    }
+    var unitMultiple = (binaryUnits) ? 1024 : 1000; 
+    var unitNames = (unitMultiple === 1024) ? // 1000 bytes in 1 Kilobyte (KB) or 1024 bytes for the binary version (KiB)
+        ['Bytes', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB']: 
+        ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    var unitChanges = Math.floor(Math.log(bytes) / Math.log(unitMultiple));
+    return parseFloat((bytes / Math.pow(unitMultiple, unitChanges)).toFixed(decimals || 0)) + ' ' + unitNames[unitChanges];
 }
