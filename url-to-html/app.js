@@ -1,10 +1,11 @@
 
-const url   = require('url');
-const chrome = require('chrome-aws-lambda');
+const url       = require('url');
+const chrome    = require('chrome-aws-lambda');
 const puppeteer = require('puppeteer-core');
-const AWS = require('aws-sdk');
-const _ = require('lodash');
-const minify = require('html-minifier').minify;
+const AWS       = require('aws-sdk');
+const _forEach  = require('lodash.foreach');
+const _findKey  = require('lodash.findkey');
+const minify    = require('html-minifier').minify;
 
 let startTime;
 let lastCall;
@@ -13,12 +14,12 @@ exports.lambdaHandler = async (event, context) => {
     let response;
     let url = event.queryStringParameters.url;
 
-    response = await renderHtml(url);
+    response = await renderHtml(url, event);
 
     return response
 }
 
-async function renderHtml(clientUrl){
+async function renderHtml(clientUrl, event){
 
     startTime = +new Date();
     lastCall = +new Date();
@@ -78,7 +79,7 @@ async function renderHtml(clientUrl){
                             let regex = /^@import url\((?:"|')(.*)(?:"|')\)(?:;)?$/igm
                             let imports = stylesheetContents[responseUrl].match(regex);
                             if(imports && imports.length>0){
-                                _.each(imports, (u)=>{
+                                _forEach(imports, (u)=>{
                                     let urlMatches = u.match(/^@import url\((?:"|')(.*)(?:"|')\)(?:;)?$/);
                                     let cssUrl = urlMatches[1].replace(/\.\.\//g, '');
                                     let css = {
@@ -121,8 +122,8 @@ async function renderHtml(clientUrl){
 
             let pageContent = await page.content();
 
-            _.each(importStyleSheets, (style)=>{
-                var newKey = _.findKey(stylesheetContents, (key, a)=>{
+            _forEach(importStyleSheets, (style)=>{
+                var newKey = _findKey(stylesheetContents, (key, a)=>{
                                 return ~a.indexOf(style.url)
                             });
                 var css = stylesheetContents[newKey]
@@ -136,8 +137,35 @@ async function renderHtml(clientUrl){
             pageContent = removeScriptTags(pageContent);
             log('remove script end');
 
+            // special case for Sixth national report [Mexico|Costa Rica which are 10MB in size]
+            // since Google bot and other SEO bots do not respect 301/302 for the original request which we are doing here due to AWS Lambda limitation
+            // strip out all style elements since they are of no use to crawlers
             
-            if(pageContent.length < 5800000){
+            if(pageContent.length > 5800000 && (event||{}).headers){
+                try{
+                    log('page content is bigger than 5.8 mb' + pageContent.length)
+                    
+                    const seoBotRegx = /(bot|crawl|archiver|transcoder|spider|uptime|validator|fetcher|cron|checker|reader|extractor|monitoring|analyzer|scraper)/i
+                    const userAgent = event.headers['X-Origin-User-Agent'];
+                    log('origin UA' + userAgent);
+                    
+                    if(seoBotRegx.test(userAgent)){
+                        const cheerio = require('cheerio');
+                        let $ = cheerio.load(pageContent);
+                        $('.page-content').find('*[style]').removeAttr('style');
+                        pageContent = $.html();
+                        log('Style attributes removed, length reduced to ' + pageContent.length)
+                    }
+                    else{
+                        log('User-agent is not bot...')
+                    }
+                }
+                catch(err){
+                    console.error('error executing special SEO condition', err);
+                }
+            }
+            
+            if(pageContent.length <= 5800000){
                 pageContent = minimizeHtml(pageContent);
                 log('minimize end');
             }
@@ -181,7 +209,7 @@ async function renderHtml(clientUrl){
             
     } catch (err) {
         log(`error in processing request, ${JSON.stringify(err||{msg:'noerror'})}`)
-        console.log('error catch', err);
+        console.error('error catch', err);
         response = {
             'statusCode': 500,
             'body': err
