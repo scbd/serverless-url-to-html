@@ -9,6 +9,8 @@ const minify    = require('html-minifier').minify;
 
 let startTime;
 let lastCall;
+let browser;
+const cacheControl = 7*24*60*60; //7days
 
 exports.lambdaHandler = async (event, context) => {
     let response;
@@ -19,29 +21,46 @@ exports.lambdaHandler = async (event, context) => {
     return response
 }
 
+async function initializeChrome(){
+    if(!browser){
+        browser = await puppeteer.launch({
+            args: chrome.args,
+            executablePath: await chrome.executablePath,
+            headless: chrome.headless,
+        });
+
+        //fake page so that if the last tap is closed the instance stays in memory
+        const fakePage = await browser.newPage();
+        log('Chrome new instance initialized')
+    }
+    else{
+        log('Chrome instance is in memory, reusing...')
+    }
+
+    return browser;
+}
+
 async function renderHtml(clientUrl, event){
 
     startTime = +new Date();
     lastCall = +new Date();
     let response;
-    let browser;
+    let page;
     try {        
             
-            browser = await puppeteer.launch({
-                args: chrome.args,
-                executablePath: await chrome.executablePath,
-                headless: chrome.headless,
-            });
+            await initializeChrome();
 
-            const page = await browser.newPage();
+            page = await browser.newPage();
             await page.setRequestInterception(true);
-            log('Page initialized')
 
             clientUrl = clientUrl.replace(/^\//, '');
-            log(`url: ${clientUrl}`)
+            console.log(`Rendering url: ${clientUrl}`)
 
             let htmlUrl = new url.URL(clientUrl);
-            if(!/cbd.int$/.test(htmlUrl.hostname) && !/cbddev.xyz$/.test(htmlUrl.hostname)){
+            let search  = querySting.parse((htmlUrl.search||'').replace(/^\?/, ''));
+
+            if(!isCBDDomain(htmlUrl.hostname)){
+                log(`Only CBD domain urls can be rendered ${htmlUrl.hostname}`)
                 return {
                     'statusCode': 400,
                     'body': 'Only CBD domain urls can be rendered'
@@ -51,10 +70,16 @@ async function renderHtml(clientUrl, event){
             
             page.on('request', async req => {
 
+                let abortRequest = false;
                 const requestUrl   = req.url();
                 const cURL         = new URL(requestUrl);
                 const isImg        = req.resourceType() === 'image';
-                if(isImg && ~cURL.pathname.indexOf('/api/v2013/documents/')){
+                
+                abortRequest = isImg && ~cURL.pathname.indexOf('/api/v2013/documents/');
+                abortRequest = abortRequest || !isCBDDomain(cURL.hostname);
+                abortRequest = abortRequest || abortNetworkUrlRequest(requestUrl);
+                
+                if(abortRequest){
                     req.abort();
                 }
                 else
@@ -100,7 +125,8 @@ async function renderHtml(clientUrl, event){
             //set X-Is-Prerender to avoid iscrawler check since headless userAgent is also consider crawler
             await page.setExtraHTTPHeaders({'X-Is-Prerender': 'true'})
 
-            let pdfOpts = {waitUntil : 'networkidle0', timeout:0}
+            let pdfOpts = {waitUntil : 'networkidle0', timeout:15*1000} //timeout:0 (makes it infinite)
+            
             await page.goto(clientUrl, pdfOpts);
             log('finished goto');
 
@@ -169,13 +195,20 @@ async function renderHtml(clientUrl, event){
                 pageContent = minimizeHtml(pageContent);
                 log('minimize end');
             }
+
+            let cacheControlHeader = {'Cache-Control': `public, max-age=${cacheControl}` };
+            if(search.cfCache == 'false')
+                cacheControlHeader = {};
             ////////////////////////////////
             /// Since there is a Lambda response limit of 6MB upload content to S3 and 302 to the S3 file
             ////////////////////////////////
             if(pageContent.length < 5800000){ //5.8 MB
                 response = {
                     'statusCode': 200,
-                    'headers'   : {"Content-Type": "text/html"},
+                    'headers'   : {
+                        "Content-Type" : "text/html",
+                        ...cacheControlHeader
+                    },
                     'body'      : pageContent
                 }
             }
@@ -201,7 +234,8 @@ async function renderHtml(clientUrl, event){
                 return {
                     statusCode: 302,
                     headers: {
-                        "Location": `https://s3.amazonaws.com/${S3_BUCKET}/${s3Options.Key}`
+                        "Location": `https://s3.amazonaws.com/${S3_BUCKET}/${s3Options.Key}`,
+                        ...cacheControlHeader
                     },
                     body: null
                 }
@@ -216,11 +250,11 @@ async function renderHtml(clientUrl, event){
         };
     }
     finally{
-        await browser.close();            
+        await page.close();            
     }
-    return response
-}
 
+    return response;
+}
 
 function removeScriptTags(content){
 
@@ -321,4 +355,16 @@ function formatBytes(bytes, decimals, binaryUnits) {
         ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
     var unitChanges = Math.floor(Math.log(bytes) / Math.log(unitMultiple));
     return parseFloat((bytes / Math.pow(unitMultiple, unitChanges)).toFixed(decimals || 0)) + ' ' + unitNames[unitChanges];
+}
+
+function isCBDDomain(hostname){
+    return /cbd.int$/.test(hostname) || 
+           /cbddev.xyz$/.test(hostname)
+}
+
+function abortNetworkUrlRequest(url){
+
+    return /\/socket\.io/.test(url) ||
+           /\app\/authorize\.html$/.test(url);
+
 }
