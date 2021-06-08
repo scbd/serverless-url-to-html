@@ -13,8 +13,8 @@ Resources:
       CodeUri: url-to-html/
       Handler: app.lambdaHandler
       Runtime: nodejs10.x
-      MemorySize: 1536
-      Timeout: 60
+      MemorySize: 650
+      Timeout: 30
       Policies:
         Statement:
           - Effect: Allow
