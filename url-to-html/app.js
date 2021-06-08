@@ -6,6 +6,7 @@ const AWS       = require('aws-sdk');
 const _forEach  = require('lodash.foreach');
 const _findKey  = require('lodash.findkey');
 const minify    = require('html-minifier').minify;
+const querySting = require('querystring');
 
 let startTime;
 let lastCall;
@@ -191,10 +192,10 @@ async function renderHtml(clientUrl, event){
                 }
             }
             
-            if(pageContent.length <= 5800000){
-                pageContent = minimizeHtml(pageContent);
-                log('minimize end');
-            }
+            // if(pageContent.length <= 5800000){
+            //     pageContent = minimizeHtml(pageContent);
+            //     log('minimize end');
+            // }
 
             let cacheControlHeader = {'Cache-Control': `public, max-age=${cacheControl}` };
             if(search.cfCache == 'false')
@@ -365,6 +366,7 @@ function isCBDDomain(hostname){
 function abortNetworkUrlRequest(url){
 
     return /\/socket\.io/.test(url) ||
-           /\app\/authorize\.html$/.test(url);
+           /\app\/authorize\.html$/.test(url) || 
+           /\/error-logs/.test(url)
 
 }
