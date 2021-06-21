@@ -68,7 +68,11 @@ async function renderHtml(clientUrl, event){
                 };
             }
             log('Domain validation passed');
-            
+
+            page.on('console', async message =>{
+                log(`${message.type().substr(0, 3).toUpperCase()} ${message.text()}`)
+            });
+
             page.on('request', async req => {
 
                 let abortRequest = false;
@@ -77,14 +81,21 @@ async function renderHtml(clientUrl, event){
                 const isImg        = req.resourceType() === 'image';
                 
                 abortRequest = isImg && ~cURL.pathname.indexOf('/api/v2013/documents/');
-                abortRequest = abortRequest || !isCBDDomain(cURL.hostname);
+                abortRequest = abortRequest //|| !isCBDDomain(cURL.hostname);
                 abortRequest = abortRequest || abortNetworkUrlRequest(requestUrl);
+                // log(`making request for ${cURL.hostname}, ${requestUrl}}`);
                 
+                let headers = {...req.headers(), ...{'x-is-prerender': undefined} }                
+                if(!isCBDDomain(cURL.hostname)){
+                    delete headers['x-is-prerender'];         
+                }
+
                 if(abortRequest){
                     req.abort();
                 }
                 else
-                    req.continue();
+                    req.continue({headers});
+                
             });
             const stylesheetContents = {};
             let   importStyleSheets  = []
@@ -101,7 +112,7 @@ async function renderHtml(clientUrl, event){
                     if (isStylesheet) {
                         stylesheetContents[responseUrl] = await resp.text();
     
-                        if(/cbd.int$/.test(cssURL.origin)){
+                        if(isCBDDomain(cssURL.origin)){
                             let regex = /^@import url\((?:"|')(.*)(?:"|')\)(?:;)?$/igm
                             let imports = stylesheetContents[responseUrl].match(regex);
                             if(imports && imports.length>0){
@@ -126,10 +137,11 @@ async function renderHtml(clientUrl, event){
             //set X-Is-Prerender to avoid iscrawler check since headless userAgent is also consider crawler
             await page.setExtraHTTPHeaders({'X-Is-Prerender': 'true'})
 
-            let pdfOpts = {waitUntil : 'networkidle0', timeout:15*1000} //timeout:0 (makes it infinite)
+            let pdfOpts = {waitUntil : 'networkidle0', timeout:15   *1000} //timeout:0 (makes it infinite)
             
             await page.goto(clientUrl, pdfOpts);
             log('finished goto');
+            // await sleep(5000);
 
             // await page.setViewport({ width: 1920, height: 1001 });
             // log('viewport set');
@@ -359,14 +371,17 @@ function formatBytes(bytes, decimals, binaryUnits) {
 }
 
 function isCBDDomain(hostname){
-    return /cbd.int$/.test(hostname) || 
-           /cbddev.xyz$/.test(hostname)
-}
+   
+    return /cbd\.int$/.test(hostname) || 
+           /cbddev\.xyz$/.test(hostname)
+}   
 
 function abortNetworkUrlRequest(url){
 
-    return /\/socket\.io/.test(url) ||
-           /\app\/authorize\.html$/.test(url) || 
-           /\/error-logs/.test(url)
+    return /api\.cbddev\.xyz\/socket\.io/.test(url) ||
+           /api\.cbd\.int\/socket\.io/.test(url) 
+        //     ||
+        //    /\app\/authorize\.html$/.test(url) || 
+        //    /\/error-logs/.test(url)
 
 }
